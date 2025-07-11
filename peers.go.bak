@@ -1,0 +1,46 @@
+package main
+
+import (
+	"bytes"
+	"fmt"
+	"io"
+	"net/http"
+	"net/url"
+	"strconv"
+)
+
+func urlEncodeInfoHash(hash [20]byte) string {
+	var buf bytes.Buffer
+	for _, b := range hash {
+		// Escape every byte
+		buf.WriteString(fmt.Sprintf("%%%02X", b))
+	}
+	return buf.String()
+}
+
+func RequestPeers(torrent TorrentFile, client Client) ([]byte, error) {
+	params := url.Values{}
+	params.Set("info_hash", urlEncodeInfoHash(torrent.InfoHash))
+	params.Set("peer_id", client.PeerID)
+	params.Set("port", strconv.Itoa(client.Port))
+	params.Set("uploaded", "0")
+	params.Set("downloaded", "0")
+	params.Set("left", strconv.Itoa(torrent.Info.Length))
+	params.Set("compact", "1")
+	params.Set("event", "started")
+
+	trackerURL := torrent.Announce + "?" + params.Encode()
+
+	resp, err := http.Get(trackerURL)
+	if err != nil {
+		return nil, fmt.Errorf("HTTP request to tracker failed: %w", err)
+	}
+	defer resp.Body.Close()
+
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, fmt.Errorf("failed to read tracker response: %w", err)
+	}
+
+	return body, nil
+}
