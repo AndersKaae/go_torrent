@@ -1,13 +1,16 @@
-package main
+package peers
 
 import (
 	"bytes"
-	"crypto/rand"
 	"crypto/sha1"
 	"errors"
+	"fmt"
 	bencode "github.com/jackpal/bencode-go"
-	"log"
+	"io"
+	"net/http"
+	"net/url"
 	"os"
+	"strconv"
 )
 
 type Info struct {
@@ -85,41 +88,48 @@ func ParseTorrentFile(path string) (TorrentFile, error) {
 	return torrent, nil
 }
 
-func generatePeerID() string {
-	prefix := "-GC0001-"
-	suffix := make([]byte, 12)
-	const charset = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"
-
-	for i := range suffix {
-		b := make([]byte, 1)
-		rand.Read(b)
-		suffix[i] = charset[int(b[0])%len(charset)]
+func urlEncodeInfoHash(hash [20]byte) string {
+	var buf bytes.Buffer
+	for _, b := range hash {
+		// Escape every byte
+		buf.WriteString(fmt.Sprintf("%%%02X", b))
 	}
-	return prefix + string(suffix)
+	return buf.String()
 }
 
-func main() {
-	client := Client{
-		PeerID: "",   // Example Peer ID
-		Port:   6881, // Example port
-	}
-	client.PeerID = generatePeerID()
-
-	torrentPath := "big-buck-bunny.torrent"
-	torrent, err := ParseTorrentFile(torrentPath)
+func RequestPeers(torrent TorrentFile, client Client) ([]byte, error) {
+	parsedURL, err := url.Parse(torrent.Announce)
 	if err != nil {
-		log.Fatalf("Error parsing torrent: %v", err)
+		return nil, err
 	}
 
-	log.Printf("Tracker URL: %s", torrent.Announce)
-	log.Printf("File Name: %s", torrent.Info.Name)
-	log.Printf("Piece Length: %d", torrent.Info.PieceLength)
-	log.Printf("Total Length: %d", torrent.Info.Length)
-	log.Printf("InfoHash: %x", torrent.InfoHash)
+	if parsedURL.Scheme == "udp" {
+		return requestPeersUDP(torrent, client)
+	}
 
-	body, err := RequestPeers(torrent, client)
+	params := url.Values{}
+	params.Set("info_hash", urlEncodeInfoHash(torrent.InfoHash))
+	params.Set("peer_id", client.PeerID)
+	params.Set("port", strconv.Itoa(client.Port))
+	params.Set("uploaded", "0")
+	params.Set("downloaded", "0")
+	params.Set("left", strconv.Itoa(torrent.Info.Length))
+	params.Set("compact", "1")
+	params.Set("event", "started")
+
+	trackerURL := torrent.Announce + "?" + params.Encode()
+
+	resp, err := http.Get(trackerURL)
 	if err != nil {
-		log.Fatalf("Error requesting peers: %v", err)
+		return nil, fmt.Errorf("HTTP request to tracker failed: %w", err)
 	}
-	log.Printf("Raw tracker response (%d bytes):\n%s", len(body), body)
+	defer resp.Body.Close()
+
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, fmt.Errorf("failed to read tracker response: %w", err)
+	}
+
+	return body, nil
 }
+
